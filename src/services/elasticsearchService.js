@@ -26,6 +26,7 @@ let esDisabled = false; // Flag để biết trạng thái ES đã được vô 
  */
 async function initClient() {
   if (esDisabled) {
+    console.log("123")
     debugLog('Elasticsearch functionality is disabled. Using MongoDB fallback for search.');
     return null;
   }
@@ -39,17 +40,24 @@ async function initClient() {
       console.warn('ELASTICSEARCH_NODE không được cấu hình trong .env. Elasticsearch bị tắt.');
       esDisabled = true;
       return null;
-    }
-
-    // Khởi tạo client với cấu hình từ file config
-    client = new Client({
+    }    // Khởi tạo client với cấu hình từ file config
+    const clientConfig = {
       node: config.node,
       maxRetries: 2,
       requestTimeout: 10000, // Timeout 10s
       ssl: {
         rejectUnauthorized: false // Tắt xác minh SSL (chỉ dùng cho môi trường dev)
       }
-    });
+    };
+
+    // Thêm API key authentication nếu có
+    if (config.auth && config.auth.apiKey) {
+      clientConfig.auth = {
+        apiKey: config.auth.apiKey
+      };
+    }
+
+    client = new Client(clientConfig);
 
     // Sử dụng info API bằng cách tương thích với phiên bản cũ hơn
     try {
@@ -1386,6 +1394,70 @@ async function getSuggestions(query, limit = 10) {
   }
 }
 
+/**
+ * Index một movie document vào Elasticsearch
+ * @param {Object} movieData - Dữ liệu phim
+ * @param {string} movieId - ID của phim (từ MongoDB)
+ * @returns {Promise<Object>} Response từ Elasticsearch
+ */
+async function indexMovie(movieData, movieId) {
+  if (esDisabled || !client) {
+    throw new Error('Elasticsearch is disabled or not initialized');
+  }
+
+  try {
+    const response = await client.index({
+      index: INDEX_NAME,
+      id: movieId,
+      body: movieData
+    });
+
+    debugLog(`Indexed movie "${movieData.name}" with ID: ${movieId}`);
+    return response;
+  } catch (error) {
+    console.error(`Error indexing movie "${movieData.name}":`, error.message);
+    throw error;
+  }
+}
+
+/**
+ * Lấy thống kê từ Elasticsearch
+ * @returns {Promise<Object>} Thống kê index
+ */
+async function getStats() {
+  if (esDisabled || !client) {
+    return { totalMovies: 0, indexExists: false };
+  }
+
+  try {
+    // Kiểm tra index có tồn tại
+    const indexExists = await client.indices.exists({ index: INDEX_NAME });
+    
+    if (!indexExists) {
+      return { totalMovies: 0, indexExists: false };
+    }
+
+    // Lấy số lượng document
+    const countResponse = await client.count({ index: INDEX_NAME });
+    const totalMovies = countResponse.count || 0;
+
+    // Lấy thông tin index
+    const statsResponse = await client.indices.stats({ index: INDEX_NAME });
+    const indexStats = statsResponse.indices[INDEX_NAME];
+
+    return {
+      totalMovies,
+      indexExists: true,
+      indexSize: indexStats?.total?.store?.size_in_bytes || 0,
+      indexSizeHuman: indexStats?.total?.store?.size || '0b'
+    };
+
+  } catch (error) {
+    console.error('Error getting Elasticsearch stats:', error.message);
+    return { totalMovies: 0, indexExists: false, error: error.message };
+  }
+}
+
 // Export các hàm cần thiết để sử dụng ở nơi khác trong ứng dụng
 module.exports = {
   initClient, // Hàm để gọi khi khởi động app
@@ -1400,5 +1472,7 @@ module.exports = {
   preprocessQuery, // Export thêm hàm tiền xử lý để có thể sử dụng riêng nếu cần
   filterByDuration, // Export hàm lọc theo độ dài
   getSuggestions, // Export hàm lấy gợi ý tìm kiếm
+  indexMovie, // Export hàm index movie
+  getStats, // Export hàm lấy thống kê
   INDEX_NAME
 };
